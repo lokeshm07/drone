@@ -1,0 +1,163 @@
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_BMP3XX.h>
+
+// ------------------------------------------------------
+// BMP388 Sensor
+// ------------------------------------------------------
+Adafruit_BMP3XX bmp;
+
+// ------------------------------------------------------
+// Joystick / Throttle Variables
+// ------------------------------------------------------
+float alpha = 0.5;
+float emaCenter = 476;
+int center = 476;
+int deadzone = 20;
+
+#define VRX 34
+#define VRY 35
+#define SW  32
+
+int hoverThrottle = 1500;
+int maxESC = 2000;
+int minESC = 1000;
+int lastGoodThrottle = hoverThrottle;
+
+// ------------------------------------------------------
+// Propeller Thrust Constants
+// ------------------------------------------------------
+const float D  = 0.254f;     // Prop diameter (meters)
+const float CT = 0.105f;     // Thrust coefficient
+
+// ------------------------------------------------------
+// Thrust Calculation at RPM
+// ------------------------------------------------------
+float thrustAtRPM(float rpm, float rho) {
+  float n = rpm / 60.0f;         // rev/sec
+  return CT * rho * n * n * pow(D, 4);
+}
+
+// ------------------------------------------------------
+// Binary Search → Find Hover RPM
+// ------------------------------------------------------
+int findHoverRPM(float weight_N, float rho) {
+  int low = 0;
+  int high = 40000;
+  float tolerance = 0.05f;
+
+  while (low <= high) {
+    int mid = (low + high) / 2;
+    float T = thrustAtRPM(mid, rho);
+
+    if (fabs(T - weight_N) < tolerance)
+      return mid;
+
+    if (T < weight_N)
+      low = mid + 1;
+    else
+      high = mid - 1;
+  }
+  return -1;
+}
+
+// ------------------------------------------------------
+// SETUP
+// ------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  analogReadResolution(10);
+  analogSetAttenuation(ADC_11db);
+  emaCenter = center;
+
+  pinMode(SW, INPUT_PULLUP);
+
+  Serial.println("BMP388 Air Density + Hover RPM Calculator");
+
+  // Initialize BMP388
+  if (!bmp.begin_I2C()) {
+    Serial.println("ERROR: BMP388 not detected!");
+    while (1);
+  }
+
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  // First sensor reading
+  if (!bmp.performReading()) {
+    Serial.println("Failed to read BMP388 sensor!");
+  }
+
+  float temp_C  = bmp.temperature;
+  float temp_K  = temp_C + 273.15f;
+  float pressure = bmp.pressure;
+
+  float rho = pressure / (287.0f * temp_K);
+
+  float weight_kg = 15.0f;
+  float weight_N  = weight_kg * 9.81f;
+
+  Serial.print("Air Density (rho) = ");
+  Serial.println(rho);
+
+  Serial.print("Weight (N) = ");
+  Serial.println(weight_N);
+
+  int hoverRPM = findHoverRPM(weight_N, rho);
+
+  Serial.print("Calculated Hover RPM = ");
+  Serial.println(hoverRPM);
+}
+
+// ------------------------------------------------------
+// FUNCTION: Throttle Hold Mode Calculator
+// ------------------------------------------------------
+int calculateThrottle_hold_mode() {
+  int rawThrottle = analogRead(VRX);
+  int button = digitalRead(SW);
+
+  // EMA smoothing
+  emaCenter = alpha * rawThrottle + (1 - alpha) * emaCenter;
+  float smoothThrottle = emaCenter;
+
+  if (button == 0) {
+    lastGoodThrottle = hoverThrottle;
+  }
+  else if (rawThrottle > center + deadzone) {
+    int escOutput = map(smoothThrottle,
+                        center + deadzone, 1023,
+                        hoverThrottle, maxESC);
+
+    lastGoodThrottle = constrain(escOutput, minESC, maxESC);
+  }
+  else if (rawThrottle < center - deadzone) {
+    int escOutput = map(smoothThrottle,
+                        0, center - deadzone,
+                        minESC, hoverThrottle);
+
+    lastGoodThrottle = constrain(escOutput, minESC, maxESC);
+  }
+
+  return lastGoodThrottle;
+}
+
+// ------------------------------------------------------
+// LOOP
+// ------------------------------------------------------
+void loop() {
+  int escFinal = calculateThrottle_hold_mode();
+
+  // Debug
+  Serial.print("Raw:");
+  Serial.print(analogRead(VRX));
+  Serial.print(" Smooth:");
+  Serial.print((int)emaCenter);
+  Serial.print(" ESC:");
+  Serial.print(escFinal);
+  Serial.print(" SW:");
+  Serial.println(digitalRead(SW));
+
+  delay(500);
+}
