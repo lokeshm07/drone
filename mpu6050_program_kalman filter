@@ -1,0 +1,101 @@
+#include <Wire.h>
+#include <MPU6050_light.h>
+
+MPU6050 mpu(Wire);
+
+// ===== Kalman variables =====
+float Q_angle = 0.001;
+float Q_bias  = 0.003;
+float R_measure = 0.03;
+
+float pitch = 0, roll = 0;
+float pitch_bias = 0, roll_bias = 0;
+
+float P_pitch[2][2] = {{1,0},{0,1}};
+float P_roll[2][2]  = {{1,0},{0,1}};
+
+unsigned long lastTime;
+
+// ===== Other params =====
+float deadZone = 0.07;
+const int loopDelay = 20;
+
+void setup() {
+  Serial.begin(115200);  // Match Web Serial
+  Wire.begin();
+
+  if (mpu.begin() != 0) {
+    while (1);
+  }
+
+  delay(1000);
+  mpu.calcOffsets();
+  lastTime = millis();
+}
+
+float kalmanUpdate(float newAngle, float newRate, float &angle, float &bias, float P[2][2], float dt) {
+  // Predict
+  angle += dt * (newRate - bias);
+
+  P[0][0] += dt * (dt*P[1][1] - P[0][1] - P[1][0] + Q_angle);
+  P[0][1] -= dt * P[1][1];
+  P[1][0] -= dt * P[1][1];
+  P[1][1] += Q_bias * dt;
+
+  // Update
+  float S = P[0][0] + R_measure;
+  float K0 = P[0][0] / S;
+  float K1 = P[1][0] / S;
+
+  float y = newAngle - angle;
+
+  angle += K0 * y;
+  bias  += K1 * y;
+
+  float P00 = P[0][0];
+  float P01 = P[0][1];
+
+  P[0][0] -= K0 * P00;
+  P[0][1] -= K0 * P01;
+  P[1][0] -= K1 * P00;
+  P[1][1] -= K1 * P01;
+
+  return angle;
+}
+
+  void loop() {
+  mpu.update();
+
+  unsigned long now = millis();
+  float dt = (now - lastTime) / 1000.0;
+  lastTime = now;
+
+  // Raw angles
+  float pitchAcc = mpu.getAngleX();
+  float rollAcc  = mpu.getAngleY();
+
+  // Gyro rates
+  float pitchRate = mpu.getGyroX();
+  float rollRate  = mpu.getGyroY();
+
+  // Kalman angles
+  pitch = kalmanUpdate(pitchAcc, pitchRate, pitch, pitch_bias, P_pitch, dt);
+  roll  = kalmanUpdate(rollAcc,  rollRate,  roll,  roll_bias,  P_roll,  dt);
+
+  // Acceleration
+  float az_t = mpu.getAccZ() * 9.81;
+  float gz   = cos(pitch*DEG_TO_RAD) * cos(roll*DEG_TO_RAD) * 9.81;
+  float az_l = az_t - gz;
+  if(abs(az_l) < deadZone) az_l = 0;
+
+  // ===== JSON Serial Output =====
+  Serial.print("{");
+  Serial.print("\"az_t\":"); Serial.print(az_t); Serial.print(",");
+  Serial.print("\"az_l\":"); Serial.print(az_l); Serial.print(",");
+  Serial.print("\"pitch\":"); Serial.print(pitch); Serial.print(",");
+  Serial.print("\"roll\":"); Serial.print(roll);
+  Serial.println("}");
+
+  delay(loopDelay);
+}
+
